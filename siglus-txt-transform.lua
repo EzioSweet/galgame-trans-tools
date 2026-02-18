@@ -7,6 +7,7 @@ if script_path ~= "" then
 end
 
 local json = require("libs.dkjson")
+local IS_WINDOWS = package.config:sub(1, 1) == "\\"
 
 local function usage()
   io.stderr:write("Usage:\n")
@@ -15,30 +16,32 @@ local function usage()
 end
 
 local function shell_quote(value)
-  return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
+  local str = tostring(value)
+  if IS_WINDOWS then
+    return '"' .. str:gsub('"', '""') .. '"'
+  end
+  return "'" .. str:gsub("'", "'\\''") .. "'"
 end
 
 local function run_cmd(cmd)
-  local handle = io.popen(cmd .. " 2>&1; printf '\\n__EXIT:%s' $?", "r")
+  local wrapped
+  if IS_WINDOWS then
+    wrapped = 'cmd /d /c "' .. cmd:gsub('"', '""') .. ' 2>&1 & echo __EXIT:%ERRORLEVEL%"'
+  else
+    wrapped = cmd .. " 2>&1; printf '\\n__EXIT:%s' $?"
+  end
+  local handle = io.popen(wrapped, "r")
   if not handle then
     error("Failed to run command: " .. cmd)
   end
   local output = handle:read("*a") or ""
   handle:close()
 
-  local body, code = output:match("^(.*)\n__EXIT:(%d+)$")
+  local body, code = output:match("^(.*)\r?\n__EXIT:(%-?%d+)%s*$")
   if not body then
     return output, 1
   end
   return body, tonumber(code)
-end
-
-local function get_cwd()
-  local out, code = run_cmd("pwd")
-  if code ~= 0 then
-    error("Failed to get current directory.")
-  end
-  return out:gsub("%s+$", "")
 end
 
 local function join_path(a, b)
@@ -74,20 +77,70 @@ local function stem(name, suffix)
   return name
 end
 
+local function normalize_path(path)
+  local normalized = tostring(path):gsub("\\", "/")
+  if #normalized > 1 then
+    normalized = normalized:gsub("/+$", "")
+    if normalized:match("^%a:$") then
+      normalized = normalized .. "/"
+    end
+  end
+  return normalized
+end
+
 local function is_directory(path)
-  local _, code = run_cmd("test -d " .. shell_quote(path))
+  local _, code = run_cmd("cd " .. shell_quote(normalize_path(path)))
   return code == 0
 end
 
-local function ensure_dir(path)
-  local out, code = run_cmd("mkdir -p " .. shell_quote(path))
-  if code ~= 0 then
+local function make_dir_once(path)
+  local out, code = run_cmd("mkdir " .. shell_quote(path))
+  if code ~= 0 and not is_directory(path) then
     error("Failed to create directory: " .. out)
   end
 end
 
+local function ensure_dir(path)
+  local normalized = normalize_path(path)
+  if normalized == "" or normalized == "." then
+    return
+  end
+
+  local root = ""
+  local rest = normalized
+  if rest:match("^%a:/") then
+    root = rest:sub(1, 3)
+    rest = rest:sub(4)
+  elseif rest:sub(1, 1) == "/" then
+    root = "/"
+    rest = rest:sub(2)
+  end
+
+  local current = root
+  for part in rest:gmatch("[^/]+") do
+    if current == "" then
+      current = part
+    elseif current:sub(-1) == "/" then
+      current = current .. part
+    else
+      current = current .. "/" .. part
+    end
+
+    if not is_directory(current) then
+      make_dir_once(current)
+    end
+  end
+end
+
 local function list_files_by_ext(dir_path, extension)
-  local out, code = run_cmd("ls -1 " .. shell_quote(dir_path))
+  local list_cmd
+  if IS_WINDOWS then
+    list_cmd = "dir /b /a-d " .. shell_quote(dir_path)
+  else
+    list_cmd = "find " .. shell_quote(dir_path) .. " -maxdepth 1 -type f -print"
+  end
+
+  local out, code = run_cmd(list_cmd)
   if code ~= 0 then
     error("Failed to list directory: " .. dir_path)
   end
@@ -95,12 +148,67 @@ local function list_files_by_ext(dir_path, extension)
   local lower_ext = extension:lower()
   local files = {}
   for line in (out .. "\n"):gmatch("(.-)\n") do
+    line = line:gsub("\r$", "")
+    if not IS_WINDOWS then
+      line = basename(line)
+    end
     if line ~= "" and extname(line):lower() == lower_ext then
       table.insert(files, line)
     end
   end
   table.sort(files)
   return files
+end
+
+local function strip_utf8_bom(content)
+  if content:sub(1, 3) == "\239\187\191" then
+    return content:sub(4)
+  end
+  return content
+end
+
+local function is_valid_utf8(text)
+  local i = 1
+  local len = #text
+  while i <= len do
+    local b1 = text:byte(i)
+    if b1 <= 0x7F then
+      i = i + 1
+    elseif b1 >= 0xC2 and b1 <= 0xDF then
+      local b2 = text:byte(i + 1)
+      if not b2 or b2 < 0x80 or b2 > 0xBF then
+        return false
+      end
+      i = i + 2
+    elseif b1 >= 0xE0 and b1 <= 0xEF then
+      local b2 = text:byte(i + 1)
+      local b3 = text:byte(i + 2)
+      if not b2 or not b3 or b2 < 0x80 or b2 > 0xBF or b3 < 0x80 or b3 > 0xBF then
+        return false
+      end
+      if (b1 == 0xE0 and b2 < 0xA0) or (b1 == 0xED and b2 > 0x9F) then
+        return false
+      end
+      i = i + 3
+    elseif b1 >= 0xF0 and b1 <= 0xF4 then
+      local b2 = text:byte(i + 1)
+      local b3 = text:byte(i + 2)
+      local b4 = text:byte(i + 3)
+      if not b2 or not b3 or not b4 then
+        return false
+      end
+      if b2 < 0x80 or b2 > 0xBF or b3 < 0x80 or b3 > 0xBF or b4 < 0x80 or b4 > 0xBF then
+        return false
+      end
+      if (b1 == 0xF0 and b2 < 0x90) or (b1 == 0xF4 and b2 > 0x8F) then
+        return false
+      end
+      i = i + 4
+    else
+      return false
+    end
+  end
+  return true
 end
 
 local function read_text(path)
@@ -110,10 +218,18 @@ local function read_text(path)
   end
   local content = file:read("*a")
   file:close()
-  return content or ""
+  content = strip_utf8_bom(content or "")
+  if not is_valid_utf8(content) then
+    error("Input file must be UTF-8: " .. path)
+  end
+  return content
 end
 
 local function write_text(path, content)
+  content = strip_utf8_bom(content or "")
+  if not is_valid_utf8(content) then
+    error("Refusing to write non-UTF-8 content: " .. path)
+  end
   local file, err = io.open(path, "wb")
   if not file then
     error("Failed to write file: " .. path .. " (" .. tostring(err) .. ")")
@@ -242,7 +358,7 @@ local function run_t2j(input_path_arg, output_path_arg)
 
   local out_file = output_path_arg
   if not out_file then
-    out_file = join_path(get_cwd(), to_json_file_name(basename(input_path_arg)))
+    out_file = to_json_file_name(basename(input_path_arg))
   end
 
   ensure_dir(dirname(out_file))
