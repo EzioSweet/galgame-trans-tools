@@ -89,8 +89,35 @@ local function normalize_path(path)
 end
 
 local function is_directory(path)
-  local _, code = run_cmd("cd " .. shell_quote(normalize_path(path)))
-  return code == 0
+  local normalized = normalize_path(path)
+
+  local cmd
+  if IS_WINDOWS then
+    local win_path = normalized:gsub("/", "\\")
+    cmd = "if exist " .. shell_quote(win_path .. "\\*") .. " (exit /b 0) else (exit /b 1)"
+  else
+    cmd = "cd " .. shell_quote(normalized)
+  end
+  local _, code = run_cmd(cmd)
+  if code == 0 then
+    return true
+  end
+
+  local file, err = io.open(normalized, "rb")
+  if file then
+    local _, read_err = file:read(1)
+    file:close()
+    local lower_read_err = tostring(read_err or ""):lower()
+    if lower_read_err:find("is a directory", 1, true) then
+      return true
+    end
+    return false
+  end
+
+  local lower_err = tostring(err or ""):lower()
+  return lower_err:find("is a directory", 1, true) ~= nil
+    or lower_err:find("permission denied", 1, true) ~= nil
+    or lower_err:find("access is denied", 1, true) ~= nil
 end
 
 local function make_dir_once(path)
