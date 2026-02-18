@@ -365,6 +365,10 @@ local function to_default_j2t_file_name(txt_path)
   return stem(basename(txt_path), ".txt") .. ".out.txt"
 end
 
+local function print_conversion(input_path, output_path)
+  io.stdout:write(tostring(input_path) .. "->" .. tostring(output_path) .. "\n")
+end
+
 local function run_t2j(input_path_arg, output_path_arg)
   local input_is_dir = is_directory(input_path_arg)
   if input_is_dir then
@@ -379,6 +383,7 @@ local function run_t2j(input_path_arg, output_path_arg)
       local out_file = join_path(output_path_arg, to_json_file_name(file_name))
       local txt = read_text(in_file)
       write_text(out_file, txt_to_json_content(txt))
+      print_conversion(in_file, out_file)
     end
     return
   end
@@ -390,6 +395,7 @@ local function run_t2j(input_path_arg, output_path_arg)
 
   ensure_dir(dirname(out_file))
   write_text(out_file, txt_to_json_content(read_text(input_path_arg)))
+  print_conversion(input_path_arg, out_file)
 end
 
 local function run_j2t(source_path_arg, json_path_arg, output_path_arg, options)
@@ -416,6 +422,7 @@ local function run_j2t(source_path_arg, json_path_arg, output_path_arg, options)
         out_txt_file,
         json_to_txt_content(read_text(source_txt_file), read_text(in_json_file), options)
       )
+      print_conversion(in_json_file, out_txt_file)
     end
     return
   end
@@ -427,6 +434,7 @@ local function run_j2t(source_path_arg, json_path_arg, output_path_arg, options)
 
   ensure_dir(dirname(out_file))
   write_text(out_file, json_to_txt_content(read_text(source_path_arg), read_text(json_path_arg), options))
+  print_conversion(json_path_arg, out_file)
 end
 
 local function main()
